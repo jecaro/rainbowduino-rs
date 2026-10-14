@@ -1,0 +1,84 @@
+# rainbowduino-rs
+
+A Rust firmware for the [Seeed Studio Rainbowduino 
+v2.0](https://wiki.seeedstudio.com/Rainbowduino_LED_driver_platform-ATmega328/),
+ an ATmega328-based driver board for an 8x8 RGB LED matrix (3x MBI5168 
+ shift-register LED drivers), controlled over I2C.
+
+Receives a full framebuffer over I2C and displays it continuously.
+
+## Hardware
+
+- MCU: ATmega328 (same chip as the Arduino Uno/Diecimila), 16MHz
+- 3x MBI5168 constant-current LED driver ICs (one per color channel), 
+  bit-banged via a simple shift register protocol on PORTC
+- I2C slave interface for receiving frame data from a master microcontroller
+
+Multiple boards can be chained on a single shared I2C bus, each with its own 
+address, to build a larger combined display (e.g. four boards as a 32x8 strip 
+or a 16x16 panel).
+
+## Protocol
+
+Each board is an I2C slave at a configurable 7-bit address. A master writes one 
+frame per transaction; see the firmware source code for details.
+
+There is no read support. If a master tries to read from a board, it gets a 
+single dummy byte with value 0.
+
+## Flashing the rainbowduino
+
+The board has no USB port, so flashing needs a 5V FTDI/USB-serial adapter wired 
+to its DTR/GND/TXD/RXD header (TX/RX crossed). See the board layout diagram in 
+`slave/src/main.rs` for where these pins are.
+
+Requires [nix](https://nixos.org/download/). Clone this repo, then from its 
+root:
+
+```sh
+nix run .#flash-slave -- /dev/ttyUSB0      # flash with the default address 0x08
+nix run .#flash-slave -- /dev/ttyUSB0 0x09 # or set RB_I2C_ADDR to 0x09 and flash in one step
+```
+
+Each physical board needs a distinct address before being wired onto a shared 
+bus with others.
+
+## Driving the rainbowduino
+
+The Rainbowduino is an I2C slave, so it needs a master to send it frames. 
+`master/` contains example firmware for an Arduino Uno acting as the I2C 
+master: it builds frames and sends them to four Rainbowduino boards, chained 
+into a 32x8 strip, to animate a scrolling rainbow.
+
+```sh
+nix run .#flash-master -- /dev/ttyUSB0
+```
+
+## Developing
+
+Start a dev shell:
+
+```sh
+nix develop
+```
+
+From here, use `cargo build`/`cargo check` etc. as usual from `slave/`, or 
+just keep using `scripts/flash-slave.sh` directly.
+
+## Other firmware
+
+Other firmware for the Rainbowduino v2.0:
+
+- [neophob/neorainbowduino](https://github.com/neophob/neorainbowduino): an 
+  I2C-slave C firmware, plus a serial-to-I2C gateway sketch and a Processing 
+  library.
+- [rainbowduino-firmware](https://code.google.com/archive/p/rainbowduino-firmware/): 
+  a higher-level command set over I2C (draw pixel/line/square, buffer swap, 
+  text, scrolling).
+- [mtXcontrol](https://github.com/rngtng/mtXcontrol): a Processing-based LED
+  matrix editor, paired with its own firmware
+  ([rainbow.ino](https://github.com/rngtng/rainbow.ino)).
+- [rainbowdash](https://github.com/kreativekorp/rainbowdash): a more advanced 
+  firmware with double-buffering and onboard animation, talks UART only, with a 
+  companion desktop app (RainbowStudio).
+
