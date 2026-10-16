@@ -24,7 +24,6 @@ pub const TW_SR_GCALL_DATA_ACK: u8 = 0x90;
 #[allow(dead_code)]
 pub const TW_SR_GCALL_DATA_NACK: u8 = 0x98;
 // STOP or repeated START received while addressed as slave
-#[allow(dead_code)]
 pub const TW_SR_STOP: u8 = 0xA0;
 
 // Slave Transmitter mode:

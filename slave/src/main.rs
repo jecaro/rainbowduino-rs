@@ -29,9 +29,11 @@
 #![feature(abi_avr_interrupt)]
 
 mod bit_guard;
+mod double_buffer;
 mod twi_status;
 
 use bit_guard::BitGuard;
+use double_buffer::DoubleBuffer;
 
 // Registers panic_halt's `#[panic_handler]` (required in no_std -- there's no default one). On
 // panic it just loops forever, halting the MCU (MicroController Unit); `as _` imports it for this
@@ -57,20 +59,12 @@ const OE: u8 = 0x08;
 //
 // In one single byte, the bits are organized in the reverse order of the columns on the physical
 // board: bit 7 is column 0, bit 6 is column 1, ..., bit 0 is column 7.
-//
-// Written by the TWI (Two-Wire Interface, Atmel/Microchip's name for I2C) ISR (Interrupt Service
-// Routine), one byte per incoming I2C data byte, read by the display-refresh ISR every line-scan.
-// No double buffering, no synchronization mechanism: the display ISR always reads whatever is
-// currently in this array.
-//
-// A frame update that lands mid-scan can show a torn frame for one refresh cycle (a few
-// milliseconds), creating a visual artifact only, hardly noticeable.
-static mut FRAMEBUFFER: [u8; 24] = [0; 24];
+static FRAMEBUFFER: DoubleBuffer = DoubleBuffer::new();
 
-// Returns the 3 color bytes (G, R, B) for the given line (0-7).
-fn line_bytes(line: u8) -> &'static [u8; 3] {
+// Returns the 3 color bytes (G, R, B) for the given line (0-7) of `buf`.
+fn line_bytes(buf: &[u8; 24], line: u8) -> &[u8; 3] {
     let start = line as usize * 3;
-    unsafe { (&FRAMEBUFFER[start..][..3]).try_into().unwrap() }
+    (&buf[start..][..3]).try_into().unwrap()
 }
 
 #[arduino_hal::entry]
@@ -172,6 +166,13 @@ fn select_line(
 fn TIMER2_OVF() {
     // Line-scan position.
     static mut LINE: u8 = 0;
+    // Snapshot of the current front buffer.
+    static mut WORKING: [u8; 24] = [0; 24];
+
+    // Refreshed once per full 8-line pass.
+    if *LINE == 0 {
+        FRAMEBUFFER.snapshot(WORKING);
+    }
 
     let peripherals = unsafe { arduino_hal::Peripherals::steal() };
 
@@ -180,11 +181,12 @@ fn TIMER2_OVF() {
 
     select_line(&peripherals.PORTB, &peripherals.PORTD, *LINE);
 
+    // The scope here ensures _le latches before re-enabling the output
     {
         // Arm the latch
         let _le = BitGuard::new(&peripherals.PORTC, LE);
 
-        shift_out_bytes(&peripherals.PORTC, line_bytes(*LINE));
+        shift_out_bytes(&peripherals.PORTC, line_bytes(WORKING, *LINE));
     }
 
     *LINE = (*LINE + 1) % 8;
@@ -192,7 +194,7 @@ fn TIMER2_OVF() {
 
 #[avr_device::interrupt(atmega328p)]
 fn TWI() {
-    // Write cursor into FRAMEBUFFER for the in-progress I2C transaction,
+    // Write cursor into the back buffer for the in-progress I2C transaction,
     // reset to 0 each time we're freshly addressed.
     static mut RX_INDEX: usize = 0;
 
@@ -214,13 +216,21 @@ fn TWI() {
             *RX_INDEX = 0;
         }
 
-        // Data byte received and ACK'd: store it into the framebuffer at the current cursor
+        // Data byte received and ACK'd: store it into the back buffer at the current cursor
         // position, if there's room.
         TW_SR_DATA_ACK | TW_SR_DATA_NACK => {
             let byte = twi.twdr().read().bits();
             if *RX_INDEX < 24 {
-                unsafe { FRAMEBUFFER[*RX_INDEX] = byte };
+                FRAMEBUFFER.write_byte(*RX_INDEX, byte);
                 *RX_INDEX += 1;
+            }
+        }
+
+        // STOP or repeated START: if a full 24-byte frame was received, publish it so the
+        // display-refresh ISR starts showing it on its next pass.
+        TW_SR_STOP => {
+            if *RX_INDEX == 24 {
+                FRAMEBUFFER.publish();
             }
         }
 
