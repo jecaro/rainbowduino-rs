@@ -7,23 +7,26 @@ use embedded_hal::i2c::I2c;
 const BOARD_COLS: i32 = 8;
 // Number of rows on a single Rainbowduino board.
 const BOARD_ROWS: i32 = 8;
-// Raw I2C frame size the Rainbowduino firmware expects: 8 rows x 3 color bytes.
-const FRAME_BYTES: usize = 24;
+// Bytes per line: 3 colors x 4 bytes (8 columns, 2 per byte, 4-bit brightness each).
+const LINE_BYTES: usize = 12;
+// Raw I2C frame size the Rainbowduino firmware expects: 8 rows x LINE_BYTES.
+const FRAME_BYTES: usize = LINE_BYTES * BOARD_ROWS as usize;
 
-// Sets or clears bit `bit_pos` of `byte` depending on `value`.
-fn set_bit(byte: &mut u8, bit_pos: i32, value: bool) {
-    if value {
-        *byte |= 1 << bit_pos;
+// Sets one 4-bit nibble of `byte` (high or low half) to `value`, masked to 4 bits.
+fn set_nibble(byte: &mut u8, high: bool, value: u8) {
+    let value = value & 0x0F;
+    if high {
+        *byte = (*byte & 0x0F) | (value << 4);
     } else {
-        *byte &= !(1 << bit_pos);
+        *byte = (*byte & 0xF0) | value;
     }
 }
 
-// Whether each of a pixel's three color channels is on.
+// Per-pixel brightness (0-15) for each color channel.
 pub struct Rgb {
-    pub r: bool,
-    pub g: bool,
-    pub b: bool,
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
 }
 
 // A framebuffer spanning `N` Rainbowduino boards chained left to right, giving a combined display
@@ -39,7 +42,7 @@ impl<const N: usize> Framebuffer<N> {
         }
     }
 
-    // Toggle one pixel's red/green/blue channels independently.
+    // Sets one pixel's red/green/blue brightness (0-15 each) independently.
     //
     // `col` is the column across the whole chain (0 = leftmost column of the first board), not a
     // per-board column. `col` or `row` outside the visible area are silently ignored, which makes
@@ -56,14 +59,15 @@ impl<const N: usize> Framebuffer<N> {
         let board = &mut self.boards[board_index as usize];
 
         let local_col = col.rem_euclid(BOARD_COLS);
-        // see slave/src/main.rs: bit order is reversed
-        let bit_pos = 7 - local_col;
-        let local_row = row as usize;
+        // see slave/src/main.rs: 2 columns per byte, even column in the high nibble
+        let byte_in_line = (local_col / 2) as usize;
+        let high = local_col % 2 == 0;
+        let line_start = row as usize * LINE_BYTES;
 
         // channel order: Green, Red, Blue
-        set_bit(&mut board[local_row * 3], bit_pos, color.g);
-        set_bit(&mut board[local_row * 3 + 1], bit_pos, color.r);
-        set_bit(&mut board[local_row * 3 + 2], bit_pos, color.b);
+        set_nibble(&mut board[line_start + byte_in_line], high, color.g);
+        set_nibble(&mut board[line_start + 4 + byte_in_line], high, color.r);
+        set_nibble(&mut board[line_start + 8 + byte_in_line], high, color.b);
     }
 
     // Push the current contents to all boards over I2C, left to right. `addrs[i]` is the 7-bit I2C

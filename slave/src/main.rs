@@ -28,12 +28,14 @@
 #![no_main]
 #![feature(abi_avr_interrupt)]
 
+mod bcm_cursor;
 mod bit_guard;
 mod double_buffer;
 mod twi_status;
 
+use bcm_cursor::{BcmCursor, LEVELS};
 use bit_guard::BitGuard;
-use double_buffer::DoubleBuffer;
+use double_buffer::{line_bytes, DoubleBuffer, Frame, Line, FRAME_BYTES};
 
 // Registers panic_halt's `#[panic_handler]` (required in no_std -- there's no default one). On
 // panic it just loops forever, halting the MCU (MicroController Unit); `as _` imports it for this
@@ -43,7 +45,7 @@ use panic_halt as _;
 // This board's I2C (Inter-Integrated Circuit) slave address. Each physical Rainbowduino on the
 // shared bus needs a distinct value here before flashing. Conveniently overriden by
 // scripts/flash.sh
-const RB_I2C_ADDR: u8 = 0x0B;
+const RB_I2C_ADDR: u8 = 08;
 
 // PORTC bits driving the 3x MBI5168 shift registers.
 // Serial Data In: the bit value shifted in on each CLK pulse
@@ -55,17 +57,18 @@ const LE: u8 = 0x04;
 // Output Enable, active-low: HIGH disables all outputs
 const OE: u8 = 0x08;
 
+// Per-level dwell time (Timer2 ticks, prescaler /64, 4us/tick) before the next line/level advance.
+// Gamma corrected (gamma ~= 2.2): the eye is far more sensitive to brightness differences at the
+// low end than the high end, so low levels get short dwell times and high levels get long ones.
+const DWELL_TICKS: [u8; LEVELS as usize] =
+    [1, 1, 4, 5, 7, 9, 10, 13, 15, 17, 19, 22, 23, 26, 28, 31];
+
 // Framebuffer: 3 color bytes per line (0-7) back to back, always in this order: Green, Red, Blue.
 //
-// In one single byte, the bits are organized in the reverse order of the columns on the physical
-// board: bit 7 is column 0, bit 6 is column 1, ..., bit 0 is column 7.
+// Each byte packs 2 columns' brightness as 4-bit nibbles, in the reverse order of the columns on
+// the physical board: byte 0 holds columns 0-1 (high nibble = column 0), ..., byte 3 holds columns
+// 6-7 (high nibble = column 6).
 static FRAMEBUFFER: DoubleBuffer = DoubleBuffer::new();
-
-// Returns the 3 color bytes (G, R, B) for the given line (0-7) of `buf`.
-fn line_bytes(buf: &[u8; 24], line: u8) -> &[u8; 3] {
-    let start = line as usize * 3;
-    (&buf[start..][..3]).try_into().unwrap()
-}
 
 #[arduino_hal::entry]
 fn main() -> ! {
@@ -80,13 +83,9 @@ fn main() -> ! {
     peripherals.PORTB.ddrb().write(|w| unsafe { w.bits(0x07) });
     peripherals.PORTD.ddrd().write(|w| unsafe { w.bits(0xF8) });
 
-    // Timer2: This drives the line-scan/shift-out cycle at a fixed rate: 16MHz / 64 / 256 (8-bit
-    // counter) ~= 976 overflows/sec, i.e. one line advance every ~1ms, so all 8 lines (one full
-    // display refresh) ~= 125 times/sec.
-    //
-    // Normal mode: no PWM (Pulse Width Modulation), no waveform generation
+    // Timer2: drives the line-scan/shift-out cycle. Normal mode, prescaler /64 (16MHz / 64 =
+    // 250kHz, 4us/tick). TIMER2_OVF reloads TCNT2 on every call to set each BCM level's dwell time.
     peripherals.TC2.tccr2a().write(|w| unsafe { w.bits(0) });
-    // CS22:0 = 0b100: prescaler /64
     peripherals
         .TC2
         .tccr2b()
@@ -126,11 +125,12 @@ fn clk_pulse(portc: &avr_device::atmega328p::PORTC) {
         .modify(|r, w| unsafe { w.bits(r.bits() | CLK) });
 }
 
-// Shifts a whole line's 3 color bytes (24 bits) into the MBI5168, MSB first.
-fn shift_out_bytes(portc: &avr_device::atmega328p::PORTC, bytes: &[u8; 3]) {
+// Shifts a whole line's 12 bytes (24 nibble-packed pixel values) into the MBI5168, MSB first. A
+// nibble lights its column only if its value exceeds `level`, the current BCM pass.
+fn shift_out_bytes(portc: &avr_device::atmega328p::PORTC, bytes: &Line, level: u8) {
     for &byte in bytes {
-        for col in (0..8).rev() {
-            let bit = (byte >> col) & 1 != 0;
+        for nibble in [byte >> 4, byte & 0x0F] {
+            let bit = nibble > level;
             portc.portc().modify(|r, w| unsafe {
                 w.bits(if bit { r.bits() | SDI } else { r.bits() & !SDI })
             });
@@ -159,37 +159,51 @@ fn select_line(
         .modify(|r, w| unsafe { w.bits((r.bits() & !0xF8) | portd_bit) });
 }
 
+// Gamma-corrected dwell time for this level: the TCNT2 preload that makes it take
+// DWELL_TICKS[level] ticks to reach the next overflow.
+fn dwell_preload(level: u8) -> u8 {
+    (256u16 - DWELL_TICKS[level as usize] as u16) as u8
+}
+
 // Fires automatically whenever Timer2's counter overflows. This is the display-refresh ISR: each
-// call redraws one line and advances to the next, cycling through all 8 lines to produce the full
-// image via persistence of vision.
+// call redraws one line at the current BCM level and advances, cycling through all 8 lines x 16
+// levels to produce both persistence-of-vision and per-pixel grayscale.
 #[avr_device::interrupt(atmega328p)]
 fn TIMER2_OVF() {
-    // Line-scan position.
-    static mut LINE: u8 = 0;
-    // Snapshot of the current front buffer.
-    static mut WORKING: [u8; 24] = [0; 24];
+    static mut CURSOR: BcmCursor = BcmCursor::new();
+    // Snapshot of the current front buffer, refreshed once per full cycle (8 lines x 16 levels).
+    static mut WORKING: Frame = [0; FRAME_BYTES];
 
-    // Refreshed once per full 8-line pass.
-    if *LINE == 0 {
+    // Get the front buffer.
+    if CURSOR.is_cycle_start() {
         FRAMEBUFFER.snapshot(WORKING);
     }
 
     let peripherals = unsafe { arduino_hal::Peripherals::steal() };
 
+    peripherals
+        .TC2
+        .tcnt2()
+        .write(|w| unsafe { w.bits(dwell_preload(CURSOR.level)) });
+
     // OE (Output Enable) off
     let _oe = BitGuard::new(&peripherals.PORTC, OE);
 
-    select_line(&peripherals.PORTB, &peripherals.PORTD, *LINE);
+    select_line(&peripherals.PORTB, &peripherals.PORTD, CURSOR.line);
 
     // The scope here ensures _le latches before re-enabling the output
     {
         // Arm the latch
         let _le = BitGuard::new(&peripherals.PORTC, LE);
 
-        shift_out_bytes(&peripherals.PORTC, line_bytes(WORKING, *LINE));
+        shift_out_bytes(
+            &peripherals.PORTC,
+            line_bytes(WORKING, CURSOR.line),
+            CURSOR.level,
+        );
     }
 
-    *LINE = (*LINE + 1) % 8;
+    CURSOR.advance();
 }
 
 #[avr_device::interrupt(atmega328p)]
@@ -220,16 +234,17 @@ fn TWI() {
         // position, if there's room.
         TW_SR_DATA_ACK | TW_SR_DATA_NACK => {
             let byte = twi.twdr().read().bits();
-            if *RX_INDEX < 24 {
+            if *RX_INDEX < FRAME_BYTES {
                 FRAMEBUFFER.write_byte(*RX_INDEX, byte);
                 *RX_INDEX += 1;
             }
         }
 
-        // STOP or repeated START: if a full 24-byte frame was received, publish it so the
-        // display-refresh ISR starts showing it on its next pass.
+        // STOP or repeated START: if a full frame was received, publish it so the display-refresh
+        // ISR starts showing it on its next pass. A short write (out of protocol) is left in the
+        // back buffer rather than shown half-updated.
         TW_SR_STOP => {
-            if *RX_INDEX == 24 {
+            if *RX_INDEX == FRAME_BYTES {
                 FRAMEBUFFER.publish();
             }
         }

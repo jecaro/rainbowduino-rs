@@ -6,15 +6,25 @@ mod framebuffer;
 use framebuffer::{Framebuffer, Rgb};
 use panic_halt as _;
 
-// Maps an index to one of the 7 non-black on/off R/G/B combinations.
-fn color_from_index(idx: u8) -> Rgb {
-    let rgb_bits = idx % 7 + 1; // 1..7
-
-    // rgb_bits' 3 low bits map directly to R, G, B on/off.
+// Classic smooth color wheel (0-255 hue -> RGB, red-green-blue-red), scaled down from 8-bit to our
+// 4-bit (0-15) per-channel brightness.
+fn wheel(pos: u8) -> Rgb {
+    let (r, g, b) = if pos < 85 {
+        // red -> green
+        (255 - pos * 3, pos * 3, 0)
+    } else if pos < 170 {
+        // green -> blue
+        let pos = pos - 85;
+        (0, 255 - pos * 3, pos * 3)
+    } else {
+        // blue -> red
+        let pos = pos - 170;
+        (pos * 3, 0, 255 - pos * 3)
+    };
     Rgb {
-        r: rgb_bits & 1 != 0,
-        g: rgb_bits & 2 != 0,
-        b: rgb_bits & 4 != 0,
+        r: r >> 4,
+        g: g >> 4,
+        b: b >> 4,
     }
 }
 
@@ -35,30 +45,27 @@ fn main() -> ! {
 
     let mut fb: Framebuffer<4> = Framebuffer::new();
 
+    // Addresses of the boards, from left to right.
+    const ADDRS: [u8; 4] = [0x08, 0x09, 0x0A, 0x0B];
+    const TOTAL_COLS: i32 = 4 * 8; // 4 boards x 8 columns
+
+    let mut phase: u8 = 0;
+
     loop {
-        // Cycle through the 7 colors.
-        for color_idx in 0..7u8 {
-            // Addresses of the boards, from left to right.
-            const ADDRS: [u8; 4] = [0x08, 0x09, 0x0A, 0x0B];
-
-            // One board's worth of columns per address.
-            const TOTAL_COLS: u8 = ADDRS.len() as u8 * 8;
-
-            // 7 colors but 8 columns/rows: the color band doesn't line up with the grid, so each
-            // diagonal gets a different color, producing a rainbow pattern.
-            for col in 0..TOTAL_COLS {
-                for row in 0..8u8 {
-                    fb.set_pixel(
-                        col as i32,
-                        row as i32,
-                        color_from_index(col + row + color_idx),
-                    );
-                }
+        // Diagonal rainbow, one full hue cycle across the display width, drifting over time.
+        for col in 0..TOTAL_COLS {
+            for row in 0..8 {
+                let hue = (col as u8)
+                    .wrapping_mul(8)
+                    .wrapping_add(row as u8 * 4)
+                    .wrapping_add(phase);
+                fb.set_pixel(col, row, wheel(hue));
             }
-
-            let _ = fb.send(&mut i2c, &ADDRS);
-
-            arduino_hal::delay_ms(100);
         }
+
+        let _ = fb.send(&mut i2c, &ADDRS);
+
+        phase = phase.wrapping_add(2);
+        arduino_hal::delay_ms(40);
     }
 }
