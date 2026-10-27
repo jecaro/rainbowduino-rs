@@ -39,8 +39,8 @@ fn main() -> ! {
         pins.a4.into_pull_up_input(),
         // SDL
         pins.a5.into_pull_up_input(),
-        // 50 kHz
-        50_000,
+        // 400 kHz
+        400_000,
     );
 
     let mut fb: Framebuffer<4> = Framebuffer::new();
@@ -65,7 +65,6 @@ fn main() -> ! {
 
         let _ = fb.send(&mut i2c, &ADDRS);
 
-        phase = phase.wrapping_add(2);
-        arduino_hal::delay_ms(40);
+        phase = phase.wrapping_add(4);
     }
 }
