@@ -63,6 +63,10 @@ const OE: u8 = 0x08;
 const DWELL_TICKS: [u8; LEVELS as usize] =
     [1, 1, 4, 5, 7, 9, 10, 13, 15, 17, 19, 22, 23, 26, 28, 31];
 
+// Outputs kept off after switching lines, so the previous line is fully off before the new data
+// lights up (otherwise it shows a faint copy of it: ghosting). Found empirically.
+const BLANKING_US: u32 = 10;
+
 // Framebuffer: 3 color bytes per line (0-7) back to back, always in this order: Green, Red, Blue.
 //
 // Each byte packs 2 columns' brightness as 4-bit nibbles, in the reverse order of the columns on
@@ -129,6 +133,7 @@ fn main() -> ! {
         // Show the just-shifted line.
         latch(&peripherals, cursor.line);
 
+        // After latch(), so blanking doesn't eat into the dwell time.
         start_dwell(&peripherals.TC2, cursor.level);
 
         cursor.advance();
@@ -195,6 +200,8 @@ fn latch(peripherals: &arduino_hal::Peripherals, line: u8) {
 
     // Pulse LE: copies the shift register to the outputs.
     drop(BitGuard::new(&peripherals.PORTC, LE));
+
+    arduino_hal::delay_us(BLANKING_US);
 }
 
 #[avr_device::interrupt(atmega328p)]
