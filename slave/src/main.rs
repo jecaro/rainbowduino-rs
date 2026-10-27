@@ -83,15 +83,12 @@ fn main() -> ! {
     peripherals.PORTB.ddrb().write(|w| unsafe { w.bits(0x07) });
     peripherals.PORTD.ddrd().write(|w| unsafe { w.bits(0xF8) });
 
-    // Timer2: drives the line-scan/shift-out cycle. Normal mode, prescaler /64 (16MHz / 64 =
-    // 250kHz, 4us/tick). TIMER2_OVF reloads TCNT2 on every call to set each BCM level's dwell time.
-    peripherals.TC2.tccr2a().write(|w| unsafe { w.bits(0) });
+    // Timer2. Set the mode to normal (overflow).
+    // Set the speed: 16MHz / 64 = 250kHz, 4us/tick.
     peripherals
         .TC2
         .tccr2b()
         .write(|w| unsafe { w.bits(0b0000_0100) });
-    // TOIE2: enable the overflow interrupt (calls TIMER2_OVF below)
-    peripherals.TC2.timsk2().write(|w| w.toie2().set_bit());
 
     // TWI slave setup. The address
     peripherals
@@ -110,24 +107,46 @@ fn main() -> ! {
 
     unsafe { avr_device::interrupt::enable() };
 
+    // Display loop.
+    let mut cursor = BcmCursor::new();
+
+    // Snapshot of the current front buffer, refreshed once per full cycle (8 lines x 16 levels).
+    let mut working: Frame = [0; FRAME_BYTES];
     loop {
-        avr_device::asm::sleep();
+        if cursor.is_cycle_start() {
+            FRAMEBUFFER.snapshot(&mut working);
+        }
+
+        // Write the current line to the shift registers.
+        shift_out_bytes(
+            &peripherals.PORTC,
+            line_bytes(&working, cursor.line),
+            cursor.level,
+        );
+
+        wait_timer2_overflow(&peripherals.TC2);
+
+        // Show the just-shifted line.
+        latch(&peripherals, cursor.line);
+
+        start_dwell(&peripherals.TC2, cursor.level);
+
+        cursor.advance();
     }
 }
 
 // Shifts a whole line's 12 bytes (24 nibble-packed pixel values) into the MBI5168, MSB first. A
 // nibble lights its column only if its value exceeds `level`, the current BCM pass.
-//
-// PORTC is read once and then written directly: this runs in the display ISR, where nothing else
-// touches PORTC.
 fn shift_out_bytes(portc: &avr_device::atmega328p::PORTC, bytes: &Line, level: u8) {
     let base = portc.portc().read().bits() & !(SDI | CLK);
+
     // CLK low with the data bit, then CLK high: the rising edge shifts it in.
     let shift_bit = |on: bool| {
         let data = if on { base | SDI } else { base };
         portc.portc().write(|w| unsafe { w.bits(data) });
         portc.portc().write(|w| unsafe { w.bits(data | CLK) });
     };
+
     // Process the two nibbles for each byte.
     for &byte in bytes {
         shift_bit(byte >> 4 > level);
@@ -153,51 +172,29 @@ fn select_line(
         .modify(|r, w| unsafe { w.bits((r.bits() & !0xF8) | portd_bit) });
 }
 
-// Gamma-corrected dwell time for this level: the TCNT2 preload that makes it take
-// DWELL_TICKS[level] ticks to reach the next overflow.
-fn dwell_preload(level: u8) -> u8 {
-    (256u16 - DWELL_TICKS[level as usize] as u16) as u8
+// Starts this level's gamma-corrected dwell time: preloads TCNT2 so that Timer2 overflows after
+// DWELL_TICKS[level] ticks.
+fn start_dwell(tc2: &avr_device::atmega328p::TC2, level: u8) {
+    let preload = (256u16 - DWELL_TICKS[level as usize] as u16) as u8;
+    tc2.tcnt2().write(|w| unsafe { w.bits(preload) });
 }
 
-// Fires automatically whenever Timer2's counter overflows. This is the display-refresh ISR: each
-// call redraws one line at the current BCM level and advances, cycling through all 8 lines x 16
-// levels to produce both persistence-of-vision and per-pixel grayscale.
-#[avr_device::interrupt(atmega328p)]
-fn TIMER2_OVF() {
-    static mut CURSOR: BcmCursor = BcmCursor::new();
-    // Snapshot of the current front buffer, refreshed once per full cycle (8 lines x 16 levels).
-    static mut WORKING: Frame = [0; FRAME_BYTES];
+// Waits for Timer2 to overflow, i.e. for the current step's dwell time to end, and acknowledges it.
+fn wait_timer2_overflow(tc2: &avr_device::atmega328p::TC2) {
+    while tc2.tifr2().read().tov2().bit_is_clear() {}
+    // Writing 1 clears the flag (AVR quirk).
+    tc2.tifr2().write(|w| w.tov2().set_bit());
+}
 
-    // Get the front buffer.
-    if CURSOR.is_cycle_start() {
-        FRAMEBUFFER.snapshot(WORKING);
-    }
-
-    let peripherals = unsafe { arduino_hal::Peripherals::steal() };
-
-    peripherals
-        .TC2
-        .tcnt2()
-        .write(|w| unsafe { w.bits(dwell_preload(CURSOR.level)) });
-
+// Switches the display to `line`, with the data shifted into the MBI5168.
+fn latch(peripherals: &arduino_hal::Peripherals, line: u8) {
     // OE (Output Enable) off
     let _oe = BitGuard::new(&peripherals.PORTC, OE);
 
-    select_line(&peripherals.PORTB, &peripherals.PORTD, CURSOR.line);
+    select_line(&peripherals.PORTB, &peripherals.PORTD, line);
 
-    // The scope here ensures _le latches before re-enabling the output
-    {
-        // Arm the latch
-        let _le = BitGuard::new(&peripherals.PORTC, LE);
-
-        shift_out_bytes(
-            &peripherals.PORTC,
-            line_bytes(WORKING, CURSOR.line),
-            CURSOR.level,
-        );
-    }
-
-    CURSOR.advance();
+    // Pulse LE: copies the shift register to the outputs.
+    drop(BitGuard::new(&peripherals.PORTC, LE));
 }
 
 #[avr_device::interrupt(atmega328p)]
