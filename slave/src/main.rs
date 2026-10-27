@@ -115,29 +115,23 @@ fn main() -> ! {
     }
 }
 
-// Pulses CLK low then high, clocking SDI's current value into the MBI5168.
-fn clk_pulse(portc: &avr_device::atmega328p::PORTC) {
-    portc
-        .portc()
-        .modify(|r, w| unsafe { w.bits(r.bits() & !CLK) });
-    portc
-        .portc()
-        .modify(|r, w| unsafe { w.bits(r.bits() | CLK) });
-}
-
 // Shifts a whole line's 12 bytes (24 nibble-packed pixel values) into the MBI5168, MSB first. A
 // nibble lights its column only if its value exceeds `level`, the current BCM pass.
+//
+// PORTC is read once and then written directly: this runs in the display ISR, where nothing else
+// touches PORTC.
 fn shift_out_bytes(portc: &avr_device::atmega328p::PORTC, bytes: &Line, level: u8) {
+    let base = portc.portc().read().bits() & !(SDI | CLK);
+    // CLK low with the data bit, then CLK high: the rising edge shifts it in.
+    let shift_bit = |on: bool| {
+        let data = if on { base | SDI } else { base };
+        portc.portc().write(|w| unsafe { w.bits(data) });
+        portc.portc().write(|w| unsafe { w.bits(data | CLK) });
+    };
+    // Process the two nibbles for each byte.
     for &byte in bytes {
-        for nibble in [byte >> 4, byte & 0x0F] {
-            let bit = nibble > level;
-            portc.portc().modify(|r, w| unsafe {
-                w.bits(if bit { r.bits() | SDI } else { r.bits() & !SDI })
-            });
-
-            // Pulse the clock to shift in the bit.
-            clk_pulse(portc);
-        }
+        shift_bit(byte >> 4 > level);
+        shift_bit(byte & 0x0F > level);
     }
 }
 
