@@ -30,12 +30,14 @@
 
 mod bcm_cursor;
 mod bit_guard;
-mod double_buffer;
+mod frame;
+mod receiver;
 mod twi_status;
 
 use bcm_cursor::{BcmCursor, LEVELS};
 use bit_guard::BitGuard;
-use double_buffer::{line_bytes, DoubleBuffer, Frame, Line, FRAME_BYTES};
+use frame::{line_bytes, Frames, Line};
+use receiver::Receiver;
 
 // Registers panic_halt's `#[panic_handler]` (required in no_std -- there's no default one). On
 // panic it just loops forever, halting the MCU (MicroController Unit); `as _` imports it for this
@@ -67,13 +69,6 @@ const DWELL_TICKS: [u8; LEVELS as usize] =
 // lights up (otherwise it shows a faint copy of it: ghosting). Found empirically.
 const BLANKING_US: u32 = 10;
 
-// Framebuffer: 3 color bytes per line (0-7) back to back, always in this order: Green, Red, Blue.
-//
-// Each byte packs 2 columns' brightness as 4-bit nibbles, in the reverse order of the columns on
-// the physical board: byte 0 holds columns 0-1 (high nibble = column 0), ..., byte 3 holds columns
-// 6-7 (high nibble = column 6).
-static FRAMEBUFFER: DoubleBuffer = DoubleBuffer::new();
-
 #[arduino_hal::entry]
 fn main() -> ! {
     let peripherals = arduino_hal::Peripherals::take().unwrap();
@@ -87,13 +82,6 @@ fn main() -> ! {
     peripherals.PORTB.ddrb().write(|w| unsafe { w.bits(0x07) });
     peripherals.PORTD.ddrd().write(|w| unsafe { w.bits(0xF8) });
 
-    // Timer2. Set the mode to normal (overflow).
-    // Set the speed: 16MHz / 64 = 250kHz, 4us/tick.
-    peripherals
-        .TC2
-        .tccr2b()
-        .write(|w| unsafe { w.bits(0b0000_0100) });
-
     // TWI slave setup. The address
     peripherals
         .TWI
@@ -105,30 +93,40 @@ fn main() -> ! {
             .set_bit() // TWEA: auto-acknowledge our address and incoming data bytes
             .twen()
             .set_bit() // TWEN: enable the TWI peripheral itself
-            .twie()
-            .set_bit() // TWIE: enable the TWI interrupt (calls fn TWI() below)
     });
 
+    // Timer2. Set the mode to normal (overflow). And the speed: 16MHz / 64 = 250kHz, 4us/tick.
+    peripherals
+        .TC2
+        .tccr2b()
+        .write(|w| unsafe { w.bits(0b0000_0100) });
+    // TOIE2: enable the overflow interrupt (calls TIMER2_OVF below)
+    peripherals.TC2.timsk2().write(|w| w.toie2().set_bit());
+
+    // TIMER2_OVF is the only interrupt. TWI is polled.
     unsafe { avr_device::interrupt::enable() };
 
     // Display loop.
     let mut cursor = BcmCursor::new();
-
-    // Snapshot of the current front buffer, refreshed once per full cycle (8 lines x 16 levels).
-    let mut working: Frame = [0; FRAME_BYTES];
+    let mut frames = Frames::new();
+    let mut receiver = Receiver::new();
     loop {
+        // A new frame only between full cycles (8 lines x 16 levels).
         if cursor.is_cycle_start() {
-            FRAMEBUFFER.snapshot(&mut working);
+            frames.show_latest();
         }
 
-        // Write the current line to the shift registers.
-        shift_out_bytes(
-            &peripherals.PORTC,
-            line_bytes(&working, cursor.line),
-            cursor.level,
-        );
+        // Copied so that polling can borrow `frames` meanwhile.
+        let line = *line_bytes(frames.front(), cursor.line);
+        let mut poll = || receiver.poll(&peripherals.TWI, &mut frames);
 
-        wait_timer2_overflow(&peripherals.TC2);
+        // Write the current line to the shift registers.
+        shift_out_bytes(&peripherals.PORTC, &line, cursor.level, &mut poll);
+
+        // Serve I2C until the current step is over.
+        while !dwell_ended(&peripherals.PORTC) {
+            poll();
+        }
 
         // Show the just-shifted line.
         latch(&peripherals, cursor.line);
@@ -142,20 +140,35 @@ fn main() -> ! {
 
 // Shifts a whole line's 12 bytes (24 nibble-packed pixel values) into the MBI5168, MSB first. A
 // nibble lights its column only if its value exceeds `level`, the current BCM pass.
-fn shift_out_bytes(portc: &avr_device::atmega328p::PORTC, bytes: &Line, level: u8) {
-    let base = portc.portc().read().bits() & !(SDI | CLK);
+//
+// Toggles SDI and CLK through PINC (writing 1 to a PINC bit flips that PORTC bit), never writing
+// PORTC itself: TIMER2_OVF may set OE meanwhile, and a PORTC write would undo it.
+//
+// Calls `poll` between bytes, so I2C isn't kept waiting for the whole line.
+fn shift_out_bytes(
+    portc: &avr_device::atmega328p::PORTC,
+    bytes: &Line,
+    level: u8,
+    poll: &mut impl FnMut(),
+) {
+    let toggle = |bits: u8| portc.pinc().write(|w| unsafe { w.bits(bits) });
+    let mut sdi_on = portc.portc().read().bits() & SDI != 0;
 
-    // CLK low with the data bit, then CLK high: the rising edge shifts it in.
-    let shift_bit = |on: bool| {
-        let data = if on { base | SDI } else { base };
-        portc.portc().write(|w| unsafe { w.bits(data) });
-        portc.portc().write(|w| unsafe { w.bits(data | CLK) });
+    // Two CLK toggles give exactly one rising edge, which shifts SDI in, whatever CLK's level.
+    let mut shift_bit = |on: bool| {
+        if on != sdi_on {
+            toggle(SDI);
+            sdi_on = on;
+        }
+        toggle(CLK);
+        toggle(CLK);
     };
 
     // Process the two nibbles for each byte.
     for &byte in bytes {
         shift_bit(byte >> 4 > level);
         shift_bit(byte & 0x0F > level);
+        poll();
     }
 }
 
@@ -181,14 +194,25 @@ fn select_line(
 // DWELL_TICKS[level] ticks.
 fn start_dwell(tc2: &avr_device::atmega328p::TC2, level: u8) {
     let preload = (256u16 - DWELL_TICKS[level as usize] as u16) as u8;
+    // Restart the prescaler, otherwise the first tick from TCNT2 comes early.
+    tc2.gtccr().write(|w| w.psrasy().set_bit());
     tc2.tcnt2().write(|w| unsafe { w.bits(preload) });
 }
 
-// Waits for Timer2 to overflow, i.e. for the current step's dwell time to end, and acknowledges it.
-fn wait_timer2_overflow(tc2: &avr_device::atmega328p::TC2) {
-    while tc2.tifr2().read().tov2().bit_is_clear() {}
-    // Writing 1 clears the flag (AVR quirk).
-    tc2.tifr2().write(|w| w.tov2().set_bit());
+// True once TIMER2_OVF has turned the outputs off.
+fn dwell_ended(portc: &avr_device::atmega328p::PORTC) -> bool {
+    portc.portc().read().bits() & OE != 0
+}
+
+// Fires when the current step's dwell time is over. Turns the outputs off right away, even if the
+// next step isn't shifted in yet: otherwise short levels would stay on for as long as shifting takes
+// (~35us instead of 4-28us), much too bright.
+#[avr_device::interrupt(atmega328p)]
+fn TIMER2_OVF() {
+    let portc = unsafe { arduino_hal::Peripherals::steal() }.PORTC;
+    portc
+        .portc()
+        .modify(|r, w| unsafe { w.bits(r.bits() | OE) });
 }
 
 // Switches the display to `line`, with the data shifted into the MBI5168.
@@ -202,67 +226,4 @@ fn latch(peripherals: &arduino_hal::Peripherals, line: u8) {
     drop(BitGuard::new(&peripherals.PORTC, LE));
 
     arduino_hal::delay_us(BLANKING_US);
-}
-
-#[avr_device::interrupt(atmega328p)]
-fn TWI() {
-    // Write cursor into the back buffer for the in-progress I2C transaction,
-    // reset to 0 each time we're freshly addressed.
-    static mut RX_INDEX: usize = 0;
-
-    use twi_status::*;
-
-    let peripherals = unsafe { arduino_hal::Peripherals::steal() };
-    let twi = peripherals.TWI;
-    let status = twi.twsr().read().bits() & 0xF8;
-
-    match status {
-        // Own SLA+W received and ACK'd: start of a new transaction, reset the write cursor.
-        TW_SR_SLA_ACK | TW_SR_ARB_LOST_SLA_ACK => {
-            // TWDR holds the SLA+W byte here (our own address + the W bit)
-            // Nothing we need, but it must still be read to clear it out.
-            let _ = twi.twdr().read().bits();
-
-            // New transaction starting: reset the write cursor so the next data byte lands at the
-            // start of the framebuffer.
-            *RX_INDEX = 0;
-        }
-
-        // Data byte received and ACK'd: store it into the back buffer at the current cursor
-        // position, if there's room.
-        TW_SR_DATA_ACK | TW_SR_DATA_NACK => {
-            let byte = twi.twdr().read().bits();
-            if *RX_INDEX < FRAME_BYTES {
-                FRAMEBUFFER.write_byte(*RX_INDEX, byte);
-                *RX_INDEX += 1;
-            }
-        }
-
-        // STOP or repeated START: if a full frame was received, publish it so the display-refresh
-        // ISR starts showing it on its next pass. A short write (out of protocol) is left in the
-        // back buffer rather than shown half-updated.
-        TW_SR_STOP => {
-            if *RX_INDEX == FRAME_BYTES {
-                FRAMEBUFFER.publish();
-            }
-        }
-
-        // Master wants to read from us: we don't support that yet, send an empty byte.
-        TW_ST_SLA_ACK | TW_ST_ARB_LOST_SLA_ACK | TW_ST_DATA_ACK | TW_ST_DATA_NACK => {
-            twi.twdr().write(|w| unsafe { w.bits(0) });
-        }
-
-        // Everything else: nothing to do beyond the common re-arm below.
-        _ => {}
-    }
-
-    twi.twcr().modify(|_, w| {
-        // On a bus error, also set TWSTO, without it the peripheral stays wedged forever.
-        if status == TW_BUS_ERROR {
-            w.twsto().set_bit();
-        }
-        // Clear TWINT (writing 1 clears it, AVR quirk) to release the clock-stretched bus and let
-        // the next event come in.
-        w.twint().set_bit()
-    });
 }
