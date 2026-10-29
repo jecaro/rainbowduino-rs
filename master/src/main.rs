@@ -1,10 +1,30 @@
 #![no_std]
 #![no_main]
 
-mod framebuffer;
-
-use framebuffer::{Framebuffer, Rgb};
 use panic_halt as _;
+use rainbowduino_display::{Board, Canvas, Layout, Rgb, Rotation};
+
+// The boards, as seen from the front: 4 in a row, the right way up.
+const LAYOUT: Layout<4, 1> = Layout {
+    boards: [[
+        Board {
+            addr: 0x08,
+            rotation: Rotation::R0,
+        },
+        Board {
+            addr: 0x09,
+            rotation: Rotation::R0,
+        },
+        Board {
+            addr: 0x0A,
+            rotation: Rotation::R0,
+        },
+        Board {
+            addr: 0x0B,
+            rotation: Rotation::R0,
+        },
+    ]],
+};
 
 // Classic smooth color wheel (0-255 hue -> RGB, red-green-blue-red), scaled down from 8-bit to our
 // 4-bit (0-15) per-channel brightness.
@@ -43,28 +63,35 @@ fn main() -> ! {
         400_000,
     );
 
-    let mut fb: Framebuffer<4> = Framebuffer::new();
+    let mut canvas = Canvas::new(LAYOUT);
 
-    // Addresses of the boards, from left to right.
-    const ADDRS: [u8; 4] = [0x08, 0x09, 0x0A, 0x0B];
-    const TOTAL_COLS: i32 = 4 * 8; // 4 boards x 8 columns
+    // Paces the animation: Timer1 in CTC mode raises OCF1A every 33ms (30 fps), whatever time
+    // drawing and I2C take. 16MHz / 1024 = 15625 ticks/s.
+    let tc1 = peripherals.TC1;
+    tc1.tccr1b()
+        .write(|w| w.wgm1().set(0b01).cs1().prescale_1024());
+    tc1.ocr1a().write(|w| unsafe { w.bits(515) });
 
     let mut phase: u8 = 0;
 
     loop {
-        // Diagonal rainbow, one full hue cycle across the display width, drifting over time.
-        for col in 0..TOTAL_COLS {
-            for row in 0..8 {
-                let hue = (col as u8)
+        // Diagonal rainbow, one full hue cycle every 32 columns, drifting over time.
+        for x in 0..canvas.width() as i32 {
+            for y in 0..canvas.height() as i32 {
+                let hue = (x as u8)
                     .wrapping_mul(8)
-                    .wrapping_add(row as u8 * 4)
+                    .wrapping_add(y as u8 * 4)
                     .wrapping_add(phase);
-                fb.set_pixel(col, row, wheel(hue));
+                canvas.set_pixel(x, y, wheel(hue));
             }
         }
 
-        let _ = fb.send(&mut i2c, &ADDRS);
+        let _ = canvas.send(&mut i2c);
 
         phase = phase.wrapping_add(4);
+
+        while tc1.tifr1().read().ocf1a().bit_is_clear() {}
+        // Writing 1 clears the flag (AVR quirk).
+        tc1.tifr1().write(|w| w.ocf1a().set_bit());
     }
 }
