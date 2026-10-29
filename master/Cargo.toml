@@ -13,6 +13,7 @@ bench = false
 [dependencies]
 panic-halt = "1.0.0"
 embedded-hal = "1.0"
+rainbowduino-display = { path = "../display" }
 
 [dependencies.arduino-hal]
 git = "https://github.com/rahix/avr-hal"

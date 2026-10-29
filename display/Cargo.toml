@@ -1,0 +1,12 @@
+[package]
+name = "rainbowduino-display"
+version = "0.1.0"
+authors = ["Jean-Charles Quillet <jeancharles.quillet@gmail.com>"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+# Hardware-independent: builds for the AVR master and for the host (`cargo test`, or a host-side
+# master over a USB-I2C adapter).
+
+[dependencies]
+embedded-hal = "1.0"
