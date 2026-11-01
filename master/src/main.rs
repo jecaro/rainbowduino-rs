@@ -57,7 +57,7 @@ fn main() -> ! {
         peripherals.TWI,
         // SDA
         pins.a4.into_pull_up_input(),
-        // SDL
+        // SCL
         pins.a5.into_pull_up_input(),
         // 400 kHz
         400_000,
@@ -65,12 +65,12 @@ fn main() -> ! {
 
     let mut canvas = Canvas::new(LAYOUT);
 
-    // Paces the animation: Timer1 in CTC mode raises OCF1A every 33ms (30 fps), whatever time
+    // Paces the animation: Timer1 in CTC mode raises OCF1A every 20ms (50 fps), whatever time
     // drawing and I2C take. 16MHz / 1024 = 15625 ticks/s.
     let tc1 = peripherals.TC1;
     tc1.tccr1b()
         .write(|w| w.wgm1().set(0b01).cs1().prescale_1024());
-    tc1.ocr1a().write(|w| unsafe { w.bits(515) });
+    tc1.ocr1a().write(|w| unsafe { w.bits(311) });
 
     let mut phase: u8 = 0;
 
@@ -91,7 +91,7 @@ fn main() -> ! {
         phase = phase.wrapping_add(4);
 
         while tc1.tifr1().read().ocf1a().bit_is_clear() {}
-        // Writing 1 clears the flag (AVR quirk).
+        // Writing 1 clears the flag.
         tc1.tifr1().write(|w| w.ocf1a().set_bit());
     }
 }
