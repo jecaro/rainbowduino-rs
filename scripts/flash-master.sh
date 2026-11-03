@@ -2,11 +2,13 @@
 # Build and flash master/ to the Arduino acting as I2C master.
 #
 # Usage:
-#   scripts/flash-master.sh <serial-port>
+#   scripts/flash-master.sh <serial-port> <binary>
 
 set -euo pipefail
 
-PORT="${1:?Usage: scripts/flash-master.sh <serial-port>}"
+USAGE="Usage: scripts/flash-master.sh <serial-port> <binary>"
+PORT="${1:?$USAGE}"
+BIN="${2:?$USAGE}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MASTER_DIR="$REPO_ROOT/master"
@@ -14,10 +16,10 @@ MASTER_DIR="$REPO_ROOT/master"
 cd "$MASTER_DIR"
 
 echo "Building..."
-cargo build --release
+cargo build --release --bin "$BIN"
 
-ELF="target/avr-none/release/master.elf"
-HEX="target/avr-none/release/master.hex"
+ELF="target/avr-none/release/$BIN.elf"
+HEX="target/avr-none/release/$BIN.hex"
 
 echo "Generating hex..."
 avr-objcopy -O ihex -R .eeprom "$ELF" "$HEX"

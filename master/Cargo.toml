@@ -6,7 +6,12 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [[bin]]
-name = "master"
+name = "rainbow"
+test = false
+bench = false
+
+[[bin]]
+name = "plasma"
 test = false
 bench = false
 

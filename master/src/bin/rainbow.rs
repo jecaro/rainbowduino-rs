@@ -65,8 +65,9 @@ fn main() -> ! {
 
     let mut canvas = Canvas::new(LAYOUT);
 
-    // Paces the animation: Timer1 in CTC mode raises OCF1A every 20ms (50 fps), whatever time
-    // drawing and I2C take. 16MHz / 1024 = 15625 ticks/s.
+    // Paces the animation at 50 fps: Timer1 in CTC mode raises OCF1A every 20ms. Drawing and
+    // sending a frame takes up to 18ms (16ms of I2C for the 4 boards).
+    // 16MHz / 1024 = 15625 ticks/s.
     let tc1 = peripherals.TC1;
     tc1.tccr1b()
         .write(|w| w.wgm1().set(0b01).cs1().prescale_1024());

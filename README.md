@@ -82,11 +82,16 @@ bus with others.
 
 The Rainbowduino is an I2C slave, so it needs a master to send it frames. 
 `master/` contains example firmware for an Arduino Uno acting as the I2C 
-master: it uses the library to animate a scrolling rainbow at 50 fps on four 
-boards chained into a 32x8 strip.
+master, using the library:
+
+- `master/src/bin/rainbow.rs`: a scrolling rainbow on four boards chained into 
+  a 32x8 strip.
+- `master/src/bin/plasma.rs`: a plasma on a 16x16 square of four boards, the 
+  bottom two upside down.
 
 ```sh
-nix run .#flash-master -- /dev/ttyUSB0
+nix run .#flash-master -- /dev/ttyUSB0 rainbow # the rainbow
+nix run .#flash-master -- /dev/ttyUSB0 plasma  # the plasma
 ```
 
 ## Developing
