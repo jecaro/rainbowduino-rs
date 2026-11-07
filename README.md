@@ -30,24 +30,24 @@ address, to build a larger combined display.
 ## Wiring
 
 Power the boards from a separate supply (9V recommanded) on their VCC/GND 
-terminals. The bus needs pull-ups: 2x 10k resistors from SDA and SCL to the 
-master's 5V. Without them, the master hangs on its first write. The master's 
-GND must be wired to the boards' GND.
+terminals. The bus needs pull-ups: 2x 2.2k resistors from SDA and SCL to 
+the master's 5V. Without them, the master hangs on its first write. The 
+master's GND must be wired to the boards' GND.
 
 ```text
-                             Rainbowduino 0x08    Rainbowduino 0x09
-                             +----------------+   +----------------+
-              9V (+) --------| VCC        VCC |---| VCC        VCC |-->
-              9V (-) --------| GND        GND |---| GND        GND |-->
-                             |                |   |                |
-Arduino Uno                  |                |   |                |  more
-+----------------+           |                |   |                |  boards
-|             5V |--+-----+  |                |   |                |  ...
-|                | 10k   10k |                |   |                |
-| USB        GND |--|-----|--| GND        GND |---| GND        GND |-->
-|       A5 (SCL) |--|-----+--| SCL        SCL |---| SCL        SCL |-->
-|       A4 (SDA) |--+--------| SDA        SDA |---| SDA        SDA |-->
-+----------------+           +----------------+   +----------------+
+                              Rainbowduino 0x08    Rainbowduino 0x09
+                              +----------------+   +----------------+
+              9V (+) ---------| VCC        VCC |---| VCC        VCC |-->
+              9V (-) ---------| GND        GND |---| GND        GND |-->
+                              |                |   |                |
+Arduino Uno                   |                |   |                |  more
++----------------+            |                |   |                |  boards
+|             5V |--+-----+   |                |   |                |  ...
+|                | 2.2k  2.2k |                |   |                |
+| USB        GND |--|-----|---| GND        GND |---| GND        GND |-->
+|       A5 (SCL) |--|-----+---| SCL        SCL |---| SCL        SCL |-->
+|       A4 (SDA) |--+---------| SDA        SDA |---| SDA        SDA |-->
++----------------+            +----------------+   +----------------+
 ```
 
 ## Protocol
@@ -61,8 +61,8 @@ single dummy byte with value 0.
 
 ## Performance
 
-- I2C at 400 kHz: a board accepts about 265 frames/s without errors. With four 
-  boards sent one after the other, that is about 65 full images/s.
+- I2C at 400 kHz: a board accepts about 280 frames/s without errors. With four 
+  boards sent one after the other, that is about 70 full images/s.
 - Display refresh: about 85 Hz, the best trade-off for colors: refreshing faster 
   would shorten the dwell times and blur the lowest brightness levels, 
   refreshing slower would make the display flicker.
