@@ -1,5 +1,7 @@
 # rainbowduino-rs
 
+<p align="center"><img src="plasma.webp" alt="Plasma on a 16x16 square of four boards"></p>
+
 Rust code for the [Seeed Studio Rainbowduino 
 v2.0](https://wiki.seeedstudio.com/Rainbowduino_LED_driver_platform-ATmega328/),
 an ATmega328-based driver board for an 8x8 RGB LED matrix (3x MBI5168 
@@ -86,8 +88,11 @@ master, using the library:
 
 - `master/src/bin/rainbow.rs`: a scrolling rainbow on four boards chained into 
   a 32x8 strip.
+
+  <p align="center"><img src="rainbow.webp" alt="Scrolling rainbow on a 32x8 strip of four boards"></p>
+
 - `master/src/bin/plasma.rs`: a plasma on a 16x16 square of four boards, the 
-  bottom two upside down.
+  bottom two upside down ([the video at the top](#rainbowduino-rs)).
 
 ```sh
 nix run .#flash-master -- /dev/ttyUSB0 rainbow # the rainbow
