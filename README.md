@@ -1,5 +1,7 @@
 # rainbowduino-rs
 
+[![CI][status-png]][status]
+
 <p align="center"><img src="plasma.webp" alt="Plasma on a 16x16 square of four boards"></p>
 
 Rust code for the [Seeed Studio Rainbowduino 
@@ -133,3 +135,5 @@ Other firmware for the Rainbowduino v2.0:
   firmware with double-buffering and onboard animation, talks UART only, with a 
   companion desktop app (RainbowStudio).
 
+[status-png]: https://github.com/jecaro/rainbowduino-rs/actions/workflows/ci.yml/badge.svg
+[status]: https://github.com/jecaro/rainbowduino-rs/actions

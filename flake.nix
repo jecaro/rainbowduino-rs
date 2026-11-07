@@ -59,6 +59,12 @@
             runtimeInputs = toolchain;
             text = ''exec ./scripts/flash-master.sh "$@"'';
           };
+
+          ci = pkgs.writeShellApplication {
+            name = "ci";
+            runtimeInputs = toolchain;
+            text = ''exec ./scripts/ci.sh'';
+          };
         });
     };
 }
