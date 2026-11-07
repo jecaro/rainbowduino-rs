@@ -7,12 +7,15 @@ v2.0](https://wiki.seeedstudio.com/Rainbowduino_LED_driver_platform-ATmega328/),
 an ATmega328-based driver board for an 8x8 RGB LED matrix (3x MBI5168 
 shift-register LED drivers), controlled over I2C:
 
-- `slave/`: the Rainbowduino firmware. It receives a full framebuffer over I2C 
-  and displays it continuously, with 16 brightness levels (4 bits) per color.
-- `display/`: a library for the I2C master, to drive a display made of several 
-  boards as a single one, in any arrangement (e.g. four boards as a 32x8 strip 
-  or a 16x16 square, with some boards upside down to simplify the wiring).
-- `master/`: an example master firmware for an Arduino Uno, using the library.
+- [`slave/`](slave/): the Rainbowduino firmware. It receives a full framebuffer 
+  over I2C and displays it continuously, with 16 brightness levels (4 bits) per 
+  color.
+- [`display/`](display/): a library for the I2C master, to drive a display made 
+  of several boards as a single one, in any arrangement (e.g. four boards as a 
+  32x8 strip or a 16x16 square, with some boards upside down to simplify the 
+  wiring).
+- [`master/`](master/): an example master firmware for an Arduino Uno, using 
+  the library.
 
 ## Hardware
 
@@ -50,7 +53,8 @@ Arduino Uno                  |                |   |                |  more
 ## Protocol
 
 Each board is an I2C slave at a configurable 7-bit address. A master writes one 
-96-byte frame per transaction; the format is described in `slave/src/frame.rs`.
+96-byte frame per transaction; the format is described in 
+[`slave/src/frame.rs`](slave/src/frame.rs).
 
 There is no read support. If a master tries to read from a board, it gets a 
 single dummy byte with value 0.
@@ -67,7 +71,7 @@ single dummy byte with value 0.
 
 The board has no USB port, so flashing needs a 5V FTDI/USB-serial adapter wired 
 to its DTR/GND/TXD/RXD header (TX/RX crossed). See the board layout diagram in 
-`slave/src/main.rs` for where these pins are.
+[`slave/src/main.rs`](slave/src/main.rs) for where these pins are.
 
 Requires [nix](https://nixos.org/download/). Clone this repo, then from its 
 root:
@@ -86,13 +90,14 @@ The Rainbowduino is an I2C slave, so it needs a master to send it frames.
 `master/` contains example firmware for an Arduino Uno acting as the I2C 
 master, using the library:
 
-- `master/src/bin/rainbow.rs`: a scrolling rainbow on four boards chained into 
-  a 32x8 strip.
+- [`master/src/bin/rainbow.rs`](master/src/bin/rainbow.rs): a scrolling 
+  rainbow on four boards chained into a 32x8 strip.
 
   <p align="center"><img src="rainbow.webp" alt="Scrolling rainbow on a 32x8 strip of four boards"></p>
 
-- `master/src/bin/plasma.rs`: a plasma on a 16x16 square of four boards, the 
-  bottom two upside down ([the video at the top](#rainbowduino-rs)).
+- [`master/src/bin/plasma.rs`](master/src/bin/plasma.rs): a plasma on a 16x16 
+  square of four boards, the bottom two upside down ([the video at the 
+  top](#rainbowduino-rs)).
 
 ```sh
 nix run .#flash-master -- /dev/ttyUSB0 rainbow # the rainbow
@@ -108,7 +113,7 @@ nix develop
 ```
 
 From here, use `cargo build`/`cargo check` etc. as usual from `slave/`, 
-`master/` or `display/`, or just keep using the scripts in `scripts/` directly. 
+`master/` or `display/`, or just keep using the scripts in [`scripts/`](scripts/) directly. 
 The library's tests run on the host: `cd display && cargo test`.
 
 ## Other firmware
